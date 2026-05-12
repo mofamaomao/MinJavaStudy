@@ -1,0 +1,119 @@
+# 深挖问题总结（第1-2天延伸）
+
+## 1. Senseable 接口
+**定义：** `sense(Content)` 和 `senseObject(LAccess sensor)`
+**LAccess：** enum类型，定义了所有可查询的状态名称
+（health, x, y, shooting, totalItems 等）
+
+**与主线的联系：**
+- Block 实现 Senseable 是因为"能被感知"不是Block的本质身份
+- 使用 implements 而非继承，避免占用唯一父类位置
+- 调用者是**逻辑处理器**（Logic Processor），通过统一接口
+  查询任意建筑/单位的状态
+
+关联源码：
+- `core/src/mindustry/world/Block.java` → `implements Senseable`
+- `core/src/mindustry/logic/LAccess.java` → enum定义
+
+---
+
+## 2. MappableContent 的映射实现
+**数据结构：** `Map<String, Content>`（名字→对象）
+**分类存储：** `contentNameMap[]` 是数组of Maps，按Content类型分开
+**原因：** 不同类型Content可能同名，分开存避免冲突
+
+**注册流程：**
+1. `new Block("copper-wall")` 调用构造函数
+2. 构造函数调用 `handleMappableContent(this)`
+3. 按类型找到对应Map，`put("copper-wall", this)`
+4. 之后可通过名字字符串快速查找对象
+
+**与主线的联系：**
+- MappableContent 在继承链第二层，专门负责"注册与查找"职责
+- 体现了继承链每层职责分明的设计思想
+
+关联源码：
+- `core/src/mindustry/ctype/MappableContent.java`
+- `core/src/mindustry/ContentLoader.java` → `handleMappableContent()`
+
+---
+
+## 3. 组合模式（Composition）
+**体现：** `BuildingComp` 里持有 `ItemModule`、`LiquidModule`、`PowerModule`
+
+**Block vs BuildingComp：**
+- `Block` = 模板（全局一份，定义属性配置，如 `hasItems`）
+- `BuildingComp` = 运行时实例（地图上每个建筑一份，持有实际状态）
+
+**组合优于继承的体现：**
+- "能存储物品"不通过继承 ItemModule 获得
+- 而是把 ItemModule 作为字段包含进来
+- 需要时才创建（`@Nullable`），不需要则为null，节省内存
+
+**与主线的联系：**
+- 第3天ECS架构的核心思想正是"组合优于继承"的极致体现
+
+关联源码：
+- `core/src/mindustry/gen/BuildingComp.java`
+```java
+  @Nullable PowerModule power;
+  @Nullable ItemModule items;
+  @Nullable LiquidModule liquids;
+```
+
+---
+
+## 4. Delta Time
+**定义：** 上一帧到这一帧经过的时间
+**Mindustry的单位：** 以60fps为基准的"帧单位"（不是秒）
+- 60fps → delta ≈ 1.0
+- 30fps → delta ≈ 2.0
+
+**计算方式：**
+```java
+// Time.java
+globalTimeRaw += Core.graphics.getDeltaTime() * 60f;
+delta = deltaimpl.get();
+```
+
+**作用：** 移动距离 = 速度 × delta
+无论帧率高低，每秒移动距离相同
+
+**与主线的联系：**
+- 游戏循环（第2天）每帧调用 `Time.updateGlobal()` 更新delta
+- 解决了慢电脑帧率低导致游戏逻辑不一致的问题
+
+关联源码：
+- `arc/modules/arc-core/src/arc/util/Time.java`
+```java
+  public static float delta = 1f;
+  public static void updateGlobal(){
+      globalTimeRaw += Core.graphics.getDeltaTime() * 60f;
+      delta = deltaimpl.get();
+  }
+```
+
+---
+
+## 5. AsyncCore.begin/end 与游戏循环的关系
+**调用位置：** `ClientLauncher.update()` 中
+```java
+asyncCore.begin();   // 提交异步任务给线程池
+super.update();      // 主线程继续处理其他逻辑
+asyncCore.end();     // 等待异步任务完成，收尾
+```
+
+**begin()：** 把 AsyncProcess 任务提交给线程池并行执行
+**end()：** 调用 complete() 等待所有异步任务完成
+
+**能异步的逻辑：** 寻路、单位AI、资源运输计算（纯逻辑）
+**不能异步的逻辑：** 渲染（依赖最终状态，必须等异步完成）
+
+**与主线的联系：**
+- 是游戏循环（第2天）的性能优化手段
+- 主线程和异步线程并行，充分利用多核CPU
+- end() 保证渲染拿到的是完整计算后的状态
+
+关联源码：
+- `core/src/mindustry/ClientLauncher.java` → `update()`
+- `core/src/mindustry/async/AsyncCore.java` → `begin()` / `end()`
