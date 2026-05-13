@@ -1,0 +1,111 @@
+# 深挖问题总结2（第3天ECS延伸）
+
+## 1. EntityProcess如何读取注解生成代码
+
+### 三轮编译流程
+- **Round 1**：读取所有 `*Comp`，为每个Comp生成对应接口
+- **Round 2**：读取 `@GroupDef`、`@EntityDef`，把接口组合成实体类，
+  生成 `Groups.java`
+- **Round 3**（else块）：实现所有接口的getter/setter，写出最终class文件
+
+### 为什么分3轮
+依赖必须先于使用：Round 2组合实体类时，Round 1的接口必须已存在
+
+### 生成文件位置
+`core/build/generated/source/kapt/main/mindustry/gen/`
+（kapt = Kotlin注解处理器，不是标准annotationProcessor路径）
+
+### 与主线的联系
+- 解释了为什么在源码里找不到 `Unit.java`
+- EntityProcess是ECS中E层的实现机制
+
+关联源码：
+- `annotations/src/main/java/mindustry/annotations/entity/EntityProcess.java`
+  → `process()` 方法，三轮生成逻辑
+
+---
+
+## 2. Groups.update()内部遍历顺序
+
+### 生成的更新顺序
+```java
+// 1. 释放上帧pooled对象
+for(Poolable p : freeQueue) Pools.free(p);
+freeQueue.clear();
+
+// 2. spatial组更新物理位置（上一帧逻辑产生的新坐标同步到空间索引）
+unit.updatePhysics();
+bullet.updatePhysics();
+
+// 3. 所有实体逻辑更新（AI决策、移动、生产）
+all.update();
+
+// 4. collide组碰撞检测
+bullet.collide();
+```
+
+### 为什么是这个顺序
+- `updatePhysics()` 在 `all.update()` 之前：
+  把上一帧算出的坐标同步到空间索引
+- `collide()` 在最后：用最新空间索引做碰撞检测
+- 碰撞检测延迟一帧：用轻微不精确换取清晰的更新顺序，
+  60fps下玩家感知不到
+
+### 与主线的联系
+- 是第2天游戏循环（`Logic.update()`）的具体实现细节
+- `Groups.update()` 由 `EntityProcess` 编译期生成，不是手写
+
+---
+
+## 3. 编译期生成的实体类
+
+### Unit.java的真实面貌
+- 路径：`core/build/generated/source/kapt/main/mindustry/gen/Unit.java`
+- 303行，全是方法签名和注解，没有手写实现
+- 实现了20个接口：
+  `Builderc, Drawc, Entityc, Healthc, Hitboxc, Itemsc, 
+   Minerc, Physicsc, Posc, Rotc, Shieldc, Statusc, Syncc, 
+   Teamc, Velc, Weaponsc, Ranged, Senseable, Settable, Displayable`
+
+### 与继承的对比
+- 用继承实现20种能力 → God Class或20层继承链
+- 用ECS组合 → 20个独立Comp，按需组合，清晰可维护
+
+### 与主线的联系
+- 验证了ECS"组合优于继承"的实际效果
+- 解释了为什么源码里找不到Unit.java：它是编译产物
+
+---
+
+## 4. Mindustry ECS vs 标准ECS（如Unity ECS）
+
+| 维度 | 标准ECS | Mindustry ECS |
+|------|---------|---------------|
+| **E** | 纯整数ID | 真实Java对象，含所有Comp字段 |
+| **C** | 纯数据，无逻辑 | 数据+简单逻辑混合 |
+| **S** | 独立System类 | 融入`Groups.update()`，无独立类 |
+| **内存** | SOA，CPU缓存友好 | AOS，缓存不友好 |
+| **适用规模** | 万级别实体 | 游戏规模足够，代码更直观 |
+
+### 与主线的联系
+- Mindustry是实用主义的折中：牺牲部分性能，换取代码可读性
+- 这也解释了为什么Comp里有逻辑方法（第3天核心发现）
+
+---
+
+## 5. spatial和collide的含义
+
+### spatial = true
+需要空间索引，实体会移动（单位、子弹）
+- 每帧调用 `updatePhysics()` 更新空间索引
+- 建筑固定不动，不需要spatial
+
+### collide = true
+碰撞有实际游戏意义，需要专门回调（只有子弹）
+- 子弹碰单位 → 造成伤害（`collide()`处理）
+- 单位碰单位 → 物理推开（`updatePhysics()`处理，不需要collide）
+
+### 与主线的联系
+- 解释了`Groups.update()`顺序中`updatePhysics()`和`collide()`的分工
+- `spatial`和`collide`由`EntityProcess` Round 2读取，
+  决定生成的`Groups.update()`里包含哪些调用
